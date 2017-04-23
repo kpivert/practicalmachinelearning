@@ -1,30 +1,348 @@
 ---
-title: "Practical Machine Learning Course Project"
+title: "Practical Machine Learning Course Project: Predicting Classes"
 author: "Kurtis Pivert"
 date: "4/21/2017"
 output: html_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+
+## Research Question
+
+Is it possible to predict what class an data observation belongs to? Using data 
+obtained from accelerometers mounted on 6 weight lifters and the dumb bells used to perform the exercise,
+this report outlines the approach used to predict the label (`classe`, 5 different 
+categories indicating if the subject performed the exercise correctly) according to 
+selected features from an individual observation of the data captured in the exercise record. 
+
+
+
+```{r 1. Load Required Packages, cache=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+                
+        ## Load Required Packages
+
+        require(tidyverse)
+        require(extrafont)
+        require(knitr)
+        require(caret)
+        loadfonts(quiet = TRUE)
+        require(rattle)
+        require(parallel)
+        require(doParallel)
+        require(rpart)
+        require(RGtk2)
+        
+        
+        
 ```
 
-## R Markdown
+## Data Used in This Report
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+The data set for this project was acquired from [GroupWare@LES](http://groupware.les.inf.puc-rio.br/har). It consists of the `training` (19622 observations of 160 variables) and `testing` 
+(20 observations of 160 variables) data sets. The `testing` set will only be used
+once after completion of model building.
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
 
-```{r cars}
-summary(cars)
+```{r 2. Load Data, echo=TRUE, cache=TRUE}
+        
+        ## Load Data Sets 
+
+        training <- read.csv("/Users/kpivert/Documents/Coursera/Course 2/practicalmachinelearning/pml-training.csv", 
+                na.strings = "NA")
+
+        testing <- read.csv("/Users/kpivert/Documents/Coursera/Course 2/practicalmachinelearning/pml-testing.csv", 
+                na.strings = "NA")
+        
+        
 ```
 
-## Including Plots
+### Exploratory Data Analysis
 
-You can also embed plots, for example:
+After reviewing the data using `str` and `summary`, all summary statistic
+data was removed (variables prefixed with `kurtosis_`, `skewness_`, `amplitude_`, `max_`, 
+`min_`, `amplitude_`, `var_`, `avg_`, `stddev_`). Nearly all of the variables 
+eliminated from inclusion in the modeling process contained 1000s of blank cells or 
+the `#DIV/0!` Excel warning. These features were removed from both the `training` and `testing`
+sets, leaving 60 features for inclusion in model building.
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r 3. EDA and Figures, echo=TRUE, cache=TRUE, warning=FALSE, message=FALSE, eval=FALSE}
+
+        ## Examine Dataset
+
+        str(training[1:50])
+        summary(training[1:50])    
+        
+        str(training[51:100])
+        summary(training[51:100])
+        
+        str(training[101:160])
+        summary(training[101:160])
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{r 3A. Removing Variables, echo=TRUE, cache=TRUE}
+        ## Using Solution from Stackexchange:
+        ## http://stackoverflow.com/questions/7597559/grep-using-a-character-vector-with-multiple        -patterns
+
+        ## ID Names of Summary Statistic Variable Columns
+        sumStats <- c("kurtosis_", "skewness_", "max_", "min_", "amplitude_", 
+              "var_", "avg_", "stddev_")
+
+        sumStatsCols <- grep(paste(sumStats, collapse = "|"), names(training))
+        
+        ## Remove Columns
+        
+        training <- training %>% select(-sumStatsCols)
+        testing <- testing %>% select(-sumStatsCols)
+
+```
+
+
+### Near-Zero Variance 
+
+After removing the summary statistic variables, only 1 feature with near-zero
+variance remains and is removed as well as the `X` variable, which is only an oberservation 
+number. This leaves 57 features for inclusion in a model to predict classification
+of the new records in the `testing` data.
+
+```{r 4. NZV, cache=TRUE, echo=TRUE} 
+                
+                ## Determine Which Variables Have Near-Zero Variance
+
+                nearZeroVar(training)
+
+                training <- training[,-c(1,6)]
+                testing <- testing[,-c(1,6)]
+
+                ## Rerun Function: No NZV Variables Left
+                nearZeroVar(training)
+
+
+```
+
+## Divide Training Data into Training and Testing Sets
+
+
+```{r 5. Divide into Train, Test, cache=TRUE, echo=TRUE}
+
+        ## Set Seed
+
+        set.seed(562013)
+
+        inTrain <- createDataPartition(training$classe, p = 0.7, list = FALSE)
+        
+                trainSet <- training[inTrain,]
+                testSet <- training[-inTrain, ]
+        
+ 
+        
+                
+```
+
+
+## Model Building and Out-of-Sample Error Rate
+
+Using the `caret` package, three classifcation models will be built on the `trainSet`
+data. The accuracy of the classification, and estimate of out-of-sample error rate,
+will be determined on the `testSet` data and the most accurate model will be applied to the
+`testing` set. 
+
+### Preprocessing
+
+Because may of the data are skewed (see the figure of belt acclerometer in the x plane), data will be centered and scaled (ignoring factors) before being used in the modeling process. 
+
+
+```{r 6. Preprocess, cache=TRUE, echo=FALSE}
+
+qplot(accel_belt_x, data = trainSet, facets = classe ~ ., geom = "density")
+
+```
+
+### Cross-Validation
+
+Models will be cross-validated using k-folds cross-validation to help select the 
+best classifying model. The number of folds used is 10. 
+
+
+```{r 7. Cross-validate Code, cache=TRUE, echo=TRUE}
+
+
+fitControl <- fitControl <- trainControl(method = "cv",
+                                         number = 10,
+                                         allowParallel = TRUE)
+
+```
+
+## Model 1: CART
+
+All classification models will use parallel processing to reduce the time required.
+The first model used is a Classification and Regression Tree approach. 
+
+Using the `testSet` data the accuaracy is low at 57.2%, with an estimated out-of-sample
+error rate of >42.8%.
+
+
+```{r 8. CART, echo=TRUE, cache=TRUE, eval= FALSE}
+                ## Set Up Parallel Processing
+
+                detectCores()
+                cluster <- makeCluster(detectCores()-1)
+                registerDoParallel(cluster)
+
+                ## Create Model
+                
+                set.seed(562013)
+                
+                mod1 <- train(classe ~ ., data = trainSet, method = "rpart",
+                              trControl= fitControl, preProcess = c("center", "scale"))
+                
+                ## Stop Cluster
+                
+                stopCluster(cluster)
+                registerDoSEQ()
+
+                ## Predict on Test Set and Use Confusion Matrix
+                
+                mod1Pred <- predict(mod1, testSet)
+                confusionMatrix(mod1Pred, testSet$classe)
+         
+```
+
+## Model 2: Random Forests
+
+Random forests can be accurate classification models, but less interpretable than
+CART. Using the `testSet` data the accuaracy was much improved at 99.9%, with an estimated out-of-sample
+error rate of >0.01%.
+
+```{r 9. Random Forests, echo=TRUE, cache=TRUE, eval=FALSE}
+                ## Set Up Parallel Processing
+
+                detectCores()
+                cluster <- makeCluster(detectCores()-1)
+                registerDoParallel(cluster)
+
+                ## Create Model
+                x <- trainSet[, -58]
+                y <- trainSet[,58]
+                
+                set.seed(562013)
+                mod2 <- train(x, y, data = trainSet, method = "rf",
+                              trControl= fitControl, preProcess = c("center", "scale"))
+                
+                ## Stop Cluster
+                
+                stopCluster(cluster)
+                registerDoSEQ()
+
+                ## Predict on Test Set and Use Confusion Matrix
+                
+                mod2Pred <- predict(mod2, testSet)
+                confusionMatrix(mod2Pred, testSet$classe)
+                
+                
+```
+
+## Model 3: Stochastic Gradient Boosting
+
+The accuracy on the `testSet` was nearly identical to Random Forests at 97.3%, with
+an estimated out-of-sample error rate 0.03%.
+
+
+```{r 10. GBM, echo=TRUE, cache=TRUE, eval = FALSE}
+                ## Set Up Parallel Processing
+
+                detectCores()
+                cluster <- makeCluster(detectCores()-1)
+                registerDoParallel(cluster)
+
+                ## Create Model
+                
+                set.seed(562013)
+                
+                mod3 <- train(classe ~ ., data = trainSet, method = "gbm",
+                              trControl= fitControl, preProcess = c("center", "scale"))
+                
+                ## Stop Cluster
+                
+                stopCluster(cluster)
+                registerDoSEQ()
+
+                ## Predict on Test Set and Use Confusion Matrix
+                
+                mod3Pred <- predict(mod3, testSet)
+                confusionMatrix(mod3Pred, testSet$classe)
+```
+
+
+## Model Selection
+
+Using the most accurate model, Random Forests, yields the following labels for 
+the testing set.
+
+testing Observation | Predicted Class
+:-----------------: | :-------------:
+1 | B
+2|A
+3|B
+4|A
+5|A
+6|E
+7|D
+8|B
+9|A
+10|A
+11|B
+12|C
+13|B
+14|A
+15|E
+16|E
+17|A
+18|B
+19|B
+20|B
+
+```{r 11. Predict on Testing Set, echo=FALSE, eval=FALSE}
+        
+        ## Thanks to OzanB for Helping me Figure This Out. 
+
+        fixFrame <- head(trainSet,1) #take first row of training set
+
+        fixFrame <- fixFrame[, -length(colnames(fixFrame))] #remove last column (classe)
+
+        validation1 <- testing[,-58] #remove id from validation data set since it is not needed for predict model. Now both have same amount of column
+
+        validation1 <- rbind(fixFrame, validation1) #add first row of training set to validation set, it somehow make column class same as testing and training sets
+
+        validation1 <- validation1[-1,] #remove first row we added previously
+
+        testPred <-predict(mod2, newdata = validation1) # run RF method and it works well
+
+        testPred
+        
+        varImp(mod2)
+        
+
+```
+
+
+Looking at the top 5 important variables we find they are:
+
+Variable | Importance
+:---------|-----------:
+cvtd_timestamp       | 100.000
+raw_timestamp_part_1  | 73.328
+roll_belt             | 31.502
+num_window           |  31.226
+magnet_dumbbell_y    | 15.912
+
+
+
+```{r Pairs Plot, echo=TRUE, cache=TRUE}
+  featurePlot(x = trainSet[,c("cvtd_timestamp", "raw_timestamp_part_1", "roll_belt", "num_window",
+               "magnet_dumbbell_y")], y = trainSet$classe, plot = "pairs")
+```
+
+
+## Conclusion 
+
+Using complex, yet less interpretable models such as Random Forests and GBM,
+yield high accuracy according to the estimated out-of-sample error rates. 
